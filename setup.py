@@ -36,6 +36,15 @@ To release a lock:
 It is possible to setup the number of retries (by default 3) and the retry
 delay (by default 200 milliseconds) used to acquire the lock.
 
+To extend your ownership of a lock that you already own:
+    dlm.extend(my_lock,ttl)
+    
+where you want to extend the liftime of the lock by `ttl` milliseconds.  This returns
+`True` if the extension succeeded and `False` if the lock had already expired.
+To test whether a lock is taken:
+    dlm.test("lock_name")
+    
+returns `True` if it is taken and `False` if it is free.
 
 **Disclaimer**: This code implements an algorithm which is currently a proposal,
 it was not formally analyzed. Make sure to understand how it works before using it

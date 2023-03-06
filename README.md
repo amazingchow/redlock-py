@@ -30,7 +30,21 @@ It is possible to setup the number of retries (by default 3) and the retry
 delay (by default 200 milliseconds) used to acquire the lock.
 
 
-Both `dlm.lock` and `dlm.unlock` raise a exception `MultipleRedlockException` if there are errors when communicating with one or more redis masters. The caller of `dlm` should
+To extend your ownership of a lock that you already own:
+
+    dlm.extend(my_lock,ttl)
+
+where you want to extend the liftime of the lock by `ttl` milliseconds.  This returns
+`True` if the extension succeeded and `False` if the lock had already expired.
+
+To test whether a lock is taken:
+
+	dlm.test("lock_name")
+
+returns `True` if it is taken and `False` if it is free.
+
+
+`dlm.lock`, `dlm.unlock`, `dlm.extend` and `dlt.test` raise a exception `MultipleRedlockException` if there are errors when communicating with one or more redis masters. The caller of `dlm` should
 use a try-catch-finally block to handle this exception. A `MultipleRedlockException` object
 encapsulates multiple `redis-py.exceptions.RedisError` objects.
 

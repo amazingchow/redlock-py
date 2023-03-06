@@ -66,10 +66,16 @@ class Redlock(object):
         self.retry_delay = retry_delay or default_retry_delay
         self._clock_drift_factor = 0.01
         self._unlock_script = """if redis.call("get",KEYS[1]) == ARGV[1] then
-        return redis.call("del",KEYS[1])
-    else
-        return 0
-    end"""
+    return redis.call("del",KEYS[1])
+else
+    return 0
+end"""
+        
+        self._extend_script = """if redis.call("get",KEYS[1]) == ARGV[1] then
+    return redis.call("pexpire",KEYS[1],ARGV[2])
+else
+    return 0
+end"""
 
     def _lock_instance(self, server, resource, val, ttl):
         try:
@@ -83,6 +89,19 @@ class Redlock(object):
             server.eval(self._unlock_script, 1, resource, val)
         except Exception:
             _g_logger.exception("Error unlocking resource %s in server %s", resource, str(server))
+
+    def _extend_instance(self, server, resource, val, ttl):
+        try:
+            return server.eval(self._extend_script, 1, resource, val, ttl) == 1
+        except Exception:
+            logging.exception("Error extending lock on resource %s in server %s", resource, str(server))
+            return False
+
+    def _test_instance(self, server, resource):
+        try:
+            return server.get(resource) is not None
+        except:
+            logging.exception("Error reading lock on resource %s in server %s", resource, str(server))
 
     def _get_unique_id(self):
         CHARACTERS = string.ascii_letters + string.digits
@@ -113,7 +132,7 @@ class Redlock(object):
             validity = int(ttl - elapsed_time - drift)
             if validity > 0 and n >= self._quorum:
                 if len(redis_errors) > 0:
-                    _g_logger.exception(MultipleRedlockException(redis_errors))
+                    raise MultipleRedlockException(redis_errors)
                 return Lock(validity, resource, val)
             else:
                 for server in self._servers:
@@ -135,4 +154,31 @@ class Redlock(object):
             except RedisError as e:
                 redis_errors.append(e)
         if len(redis_errors) > 0:
-            _g_logger.exception(MultipleRedlockException(redis_errors))
+            raise MultipleRedlockException(redis_errors)
+
+    def extend(self, lock, ttl):
+        redis_errors = []
+        n = 0
+        for server in self._servers:
+            try:
+                if self._extend_instance(server, lock.resource, lock.key, ttl):
+                    n += 1
+            except RedisError as e:
+                redis_errors.append(e)
+        if len(redis_errors) > 0:
+            raise MultipleRedlockException(redis_errors)
+        return n >= self._quorum
+
+    def test(self, resource):
+        redis_errors = []
+        lock = Lock(0, resource, None)
+        n = 0
+        for server in self._servers:
+            try:
+                if self._test_instance(server, lock.resource):
+                    n += 1
+            except RedisError as e:
+                redis_errors.append(e)
+        if len(redis_errors) > 0:
+            raise MultipleRedlockException(redis_errors)
+        return n >= self._quorum
