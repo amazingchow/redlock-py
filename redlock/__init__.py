@@ -95,7 +95,8 @@ class Redlock(object):
         drift = int(ttl * self.clock_drift_factor) + 2
 
         redis_errors = list()
-        while retry < self.retry_count:
+        restart_attempt = True
+        while restart_attempt:
             n = 0
             start_time = int(time.time() * 1000)
             del redis_errors[:]
@@ -118,7 +119,9 @@ class Redlock(object):
                     except:
                         pass
                 retry += 1
-                time.sleep(self.retry_delay)
+                restart_attempt = retry < self.retry_count
+                if restart_attempt:
+                    time.sleep(self.retry_delay)
         return False
 
     def unlock(self, lock):
