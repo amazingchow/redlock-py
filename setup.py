@@ -72,7 +72,7 @@ setup(
     include_package_data=True,
     description='Redis locking mechanism',
     long_description=README,
-    url='https://github.com/SPSCommerce/identity-service',
+    url='https://github.com/amazingchow/redlock-py',
     classifiers=[
         'Development Status :: 5 - Production/Stable',
         'Intended Audience :: Developers',
