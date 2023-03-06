@@ -40,12 +40,11 @@ class Redlock(object):
     default_retry_count = 3
     default_retry_delay = 0.2
     clock_drift_factor = 0.01
-    unlock_script = """
-    if redis.call("get",KEYS[1]) == ARGV[1] then
-        return redis.call("del",KEYS[1])
-    else
-        return 0
-    end"""
+    unlock_script = """if redis.call("get",KEYS[1]) == ARGV[1] then
+    return redis.call("del",KEYS[1])
+else
+    return 0
+end"""
 
     def __init__(self, connection_list, retry_count=None, retry_delay=None):
         self.servers = []
@@ -78,8 +77,8 @@ class Redlock(object):
     def unlock_instance(self, server, resource, val):
         try:
             server.eval(self.unlock_script, 1, resource, val)
-        except Exception as e:
-            logging.exception("Error unlocking resource %s in server %s", resource, str(server))
+        except Exception:
+            logging.exception("Error unlocking resource %s in server %s, err", resource, str(server))
 
     def get_unique_id(self):
         CHARACTERS = string.ascii_letters + string.digits
