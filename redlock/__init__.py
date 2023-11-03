@@ -1,27 +1,19 @@
 # -*- coding: utf-8 -*-
-import logging
+import asyncio
 import random
-import redis
 import string
-import sys
 import time
 
+import redis
+import redis.asyncio as aio_redis
+import redis.exceptions as redis_exceptions
+
 from collections import namedtuple
-from redis.exceptions import RedisError
+from typing import List, NoReturn, Optional, Tuple, Union
 
-_g_logger = logging.getLogger("redlock")
-_handler = logging.StreamHandler(sys.stdout)
-_handler.setLevel(logging.INFO)
-_formatter = logging.Formatter(
-    fmt="[%(asctime)s][%(levelname)s][%(name)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-_handler.setFormatter(_formatter)
-_g_logger.addHandler(_handler)
-_g_logger.setLevel(logging.INFO)
-_g_logger.propagate = False
+from loguru import logger as loguru_logger
 
-Lock = namedtuple("Lock", ("validity", "resource", "key"))
+Lock = namedtuple("Lock", ("validity", "resource", "val"))
 
 
 class CannotObtainLock(Exception):
@@ -42,23 +34,16 @@ class MultipleRedlockException(Exception):
 
 class Redlock(object):
 
-    def __init__(self, connection_list: list, retry_count=None, retry_delay=None):
-        self._servers = []
-        for connection_info in connection_list:
-            try:
-                if isinstance(connection_info, str):
-                    server = redis.StrictRedis.from_url(connection_info)
-                elif type(connection_info) == dict:
-                    server = redis.StrictRedis(**connection_info)
-                else:
-                    server = connection_info
-                self._servers.append(server)
-            except Exception as e:
-                raise Warning(str(e))
-        self._quorum = (len(connection_list) // 2) + 1
-        if len(self._servers) < self._quorum:
-            raise CannotObtainLock("Failed to connect to the majority of redis servers")
-        _g_logger.info("Server Quorum:{}".format(len(self._servers)))
+    def __init__(
+            self, connections: List[Union[redis.Redis, aio_redis.Redis]],
+            async_mode: bool = True,
+            retry_count: float = None,
+            retry_delay: float = None
+        ):
+
+        self._async_mode = async_mode
+        self._servers = connections
+        self._quorum = (len(connections) // 2) + 1
 
         default_retry_count = 3
         self.retry_count = retry_count or default_retry_count
@@ -70,44 +55,78 @@ class Redlock(object):
 else
     return 0
 end"""
-        
         self._extend_script = """if redis.call("get",KEYS[1]) == ARGV[1] then
     return redis.call("pexpire",KEYS[1],ARGV[2])
 else
     return 0
 end"""
 
-    def _lock_instance(self, server, resource, val, ttl):
+    async def _alock_instance(
+            self,
+            server: aio_redis.Redis,
+            resource: str,
+            val: str,
+            ttl: int
+        ) -> bool:
         try:
             assert isinstance(ttl, int), "ttl {} is not an integer".format(ttl)
         except AssertionError as e:
             raise ValueError(str(e))
-        return server.set(resource, val, nx=True, px=ttl)
+        return await server.execute_command(f"SET {resource} {val} NX PX {ttl}") == b"OK"
 
-    def _unlock_instance(self, server, resource, val):
+    def _lock_instance(
+            self,
+            server: redis.Redis,
+            resource: str,
+            val: str,
+            ttl: int
+        ) -> bool:
         try:
-            server.eval(self._unlock_script, 1, resource, val)
-        except Exception:
-            _g_logger.exception("Error unlocking resource %s in server %s", resource, str(server))
+            assert isinstance(ttl, int), "ttl {} is not an integer".format(ttl)
+        except AssertionError as e:
+            raise ValueError(str(e))
+        return server.execute_command(f"SET {resource} {val} NX PX {ttl}") == b"OK"
 
-    def _extend_instance(self, server, resource, val, ttl):
-        try:
-            return server.eval(self._extend_script, 1, resource, val, ttl) == 1
-        except Exception:
-            logging.exception("Error extending lock on resource %s in server %s", resource, str(server))
-            return False
+    async def _aunlock_instance(
+            self,
+            server: aio_redis.Redis,
+            resource: str,
+            val: str
+        ) -> NoReturn:
+        await server.execute_command("EVAL", self._unlock_script, 1, resource, val)
 
-    def _test_instance(self, server, resource):
-        try:
-            return server.get(resource) is not None
-        except:
-            logging.exception("Error reading lock on resource %s in server %s", resource, str(server))
+    def _unlock_instance(
+            self,
+            server: redis.Redis,
+            resource: str,
+            val: str
+        ) -> NoReturn:
+        server.execute_command("EVAL", self._unlock_script, 1, resource, val)
 
-    def _get_unique_id(self):
+    async def _aextend_instance(
+            self,
+            server: aio_redis.Redis,
+            resource: str,
+            val: str,
+            ttl: int
+        ) -> bool:
+        return await server.execute_command("EVAL", self._extend_script, 1, resource, val, ttl) == 0
+
+    def _extend_instance(
+            self,
+            server: aio_redis.Redis,
+            resource: str,
+            val: str,
+            ttl: int
+        ) -> bool:
+        return server.execute_command("EVAL", self._extend_script, 1, resource, val, ttl) == 0
+
+    def _get_unique_id(self) -> str:
         CHARACTERS = string.ascii_letters + string.digits
-        return "".join(random.choice(CHARACTERS) for _ in range(22)).encode()
+        return "".join([random.choice(CHARACTERS) for _ in range(22)])
 
-    def lock(self, resource, ttl):
+    async def alock(self, resource: str, ttl: int) -> Tuple[bool, Optional[Lock]]:
+        """To acquire a lock. Param ttl should be milliseconds."""
         retry = 0
         val = self._get_unique_id()
 
@@ -120,20 +139,68 @@ end"""
         restart_attempt = True
         while restart_attempt:
             n = 0
-            start_time = int(time.time() * 1000)
             del redis_errors[:]
+
+            st = int(time.time() * 1000)
             for server in self._servers:
                 try:
-                    if self._lock_instance(server, resource, val, ttl):
+                    ok = await self._alock_instance(server, resource, val, ttl)
+                    if ok:
                         n += 1
-                except RedisError as e:
+                except redis_exceptions.RedisError as e:
                     redis_errors.append(e)
-            elapsed_time = int(time.time() * 1000) - start_time
+            ed = int(time.time() * 1000)
+            elapsed_time = ed - st
+            
             validity = int(ttl - elapsed_time - drift)
             if validity > 0 and n >= self._quorum:
                 if len(redis_errors) > 0:
-                    raise MultipleRedlockException(redis_errors)
-                return Lock(validity, resource, val)
+                    loguru_logger.error(f"Redlock Lock Error:{MultipleRedlockException(redis_errors)}")
+                return (True, Lock(validity, resource, val))
+            else:
+                for server in self._servers:
+                    try:
+                        await self._aunlock_instance(server, resource, val)
+                    except:
+                        pass
+                retry += 1
+                restart_attempt = retry < self.retry_count
+                if restart_attempt:
+                    await asyncio.sleep(self.retry_delay)
+        return (False, None)
+
+    def lock(self, resource: str, ttl: int) -> Lock:
+        """To acquire a lock. Param ttl should be milliseconds."""
+        retry = 0
+        val = self._get_unique_id()
+
+        # Add 2 milliseconds to the drift to account for Redis expires
+        # precision, which is 1 millisecond, plus 1 millisecond min
+        # drift for small TTLs.
+        drift = int(ttl * self._clock_drift_factor) + 2
+
+        redis_errors = []
+        restart_attempt = True
+        while restart_attempt:
+            n = 0
+            del redis_errors[:]
+
+            st = int(time.time() * 1000)
+            for server in self._servers:
+                try:
+                    ok = self._lock_instance(server, resource, val, ttl)
+                    if ok:
+                        n += 1
+                except redis_exceptions.RedisError as e:
+                    redis_errors.append(e)
+            ed = int(time.time() * 1000)
+            elapsed_time = ed - st
+            
+            validity = int(ttl - elapsed_time - drift)
+            if validity > 0 and n >= self._quorum:
+                if len(redis_errors) > 0:
+                    loguru_logger.error(f"Redlock Lock Error:{MultipleRedlockException(redis_errors)}")
+                return (True, Lock(validity, resource, val))
             else:
                 for server in self._servers:
                     try:
@@ -144,41 +211,60 @@ end"""
                 restart_attempt = retry < self.retry_count
                 if restart_attempt:
                     time.sleep(self.retry_delay)
-        return False
+        return (False, None)
 
-    def unlock(self, lock):
+    async def aunlock(self, lock: Lock) -> bool:
+        """To release a lock you already own"""
         redis_errors = []
         for server in self._servers:
             try:
-                self._unlock_instance(server, lock.resource, lock.key)
-            except RedisError as e:
+                await self._aunlock_instance(server, lock.resource, lock.val)
+            except redis_exceptions.RedisError as e:
                 redis_errors.append(e)
         if len(redis_errors) > 0:
-            raise MultipleRedlockException(redis_errors)
+            loguru_logger.error(f"Redlock Unlock Error:{MultipleRedlockException(redis_errors)}")
+            return False
+        return True
 
-    def extend(self, lock, ttl):
+    def unlock(self, lock: Lock) -> bool:
+        """To release a lock you already own"""
+        redis_errors = []
+        for server in self._servers:
+            try:
+                self._unlock_instance(server, lock.resource, lock.val)
+            except redis_exceptions.RedisError as e:
+                redis_errors.append(e)
+        if len(redis_errors) > 0:
+            loguru_logger.error(f"Redlock Unlock Error:{MultipleRedlockException(redis_errors)}")
+            return False
+        return True
+
+    async def aextend(self, lock: Lock, ttl: int) -> bool:
+        """To extend your ownership of a lock you already own. Param ttl should be milliseconds."""
         redis_errors = []
         n = 0
         for server in self._servers:
             try:
-                if self._extend_instance(server, lock.resource, lock.key, ttl):
+                ok = await self._aextend_instance(server, lock.resource, lock.val, ttl)
+                if ok:
                     n += 1
-            except RedisError as e:
+            except redis_exceptions.RedisError as e:
                 redis_errors.append(e)
         if len(redis_errors) > 0:
-            raise MultipleRedlockException(redis_errors)
+            loguru_logger.error(f"Redlock Extend Error:{MultipleRedlockException(redis_errors)}")
         return n >= self._quorum
 
-    def test(self, resource):
+    def extend(self, lock: Lock, ttl: int) -> bool:
+        """To extend your ownership of a lock you already own. Param ttl should be milliseconds."""
         redis_errors = []
-        lock = Lock(0, resource, None)
         n = 0
         for server in self._servers:
             try:
-                if self._test_instance(server, lock.resource):
+                ok = self._extend_instance(server, lock.resource, lock.val, ttl)
+                if ok:
                     n += 1
-            except RedisError as e:
+            except redis_exceptions.RedisError as e:
                 redis_errors.append(e)
         if len(redis_errors) > 0:
-            raise MultipleRedlockException(redis_errors)
+            loguru_logger.error(f"Redlock Extend Error:{MultipleRedlockException(redis_errors)}")
         return n >= self._quorum

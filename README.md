@@ -6,48 +6,36 @@ This python lib implements the Redis-based distributed lock manager algorithm [d
 
 To create a lock manager:
 
-    dlm = Redlock([{"host": "localhost", "port": 6379, "db": 0}, ])
+    conn = redis.Redis(
+        host="localhost",
+        port=6379
+    )
+    dlm = Redlock(connections=[conn], async_mode=False)
 
 To acquire a lock:
 
-    my_lock = dlm.lock("my_resource_name",1000)
+    ok, my_lock = dlm.lock("my_resource_name", 1000)
 
-Where the resource name is an unique identifier of what you are trying to lock
-and 1000 is the number of milliseconds for the validity time.
+Where the resource name is an unique identifier of what you are trying to lock and 1000 is the number of milliseconds for the validity time.
 
-The returned value is `False` if the lock was not acquired (you may try again),
-otherwise an namedtuple representing the lock is returned, having three fields:
+The returned ok flag is `False` if the lock was not acquired (you may try again), otherwise an namedtuple representing the lock is returned, having three fields:
 
 * validity, an integer representing the number of milliseconds the lock will be valid.
 * resource, the name of the locked resource as specified by the user.
-* key, a random value which is used to safe reclaim the lock.
+* val, a random value which is used to safe reclaim the lock.
 
 To release a lock:
 
     dlm.unlock(my_lock)
 
-It is possible to setup the number of retries (by default 3) and the retry
-delay (by default 200 milliseconds) used to acquire the lock.
-
+It is possible to setup the number of retries (by default 3) and the retry delay (by default 200 milliseconds) used to acquire the lock.
 
 To extend your ownership of a lock that you already own:
 
-    dlm.extend(my_lock,ttl)
+    dlm.extend(my_lock, ttl)
 
 where you want to extend the liftime of the lock by `ttl` milliseconds.  This returns
 `True` if the extension succeeded and `False` if the lock had already expired.
-
-To test whether a lock is taken:
-
-	dlm.test("lock_name")
-
-returns `True` if it is taken and `False` if it is free.
-
-
-`dlm.lock`, `dlm.unlock`, `dlm.extend` and `dlt.test` raise a exception `MultipleRedlockException` if there are errors when communicating with one or more redis masters. The caller of `dlm` should
-use a try-catch-finally block to handle this exception. A `MultipleRedlockException` object
-encapsulates multiple `redis-py.exceptions.RedisError` objects.
-
 
 **Disclaimer**: This code implements an algorithm which is currently a proposal, it was not formally analyzed. Make sure to understand how it works before using it in your production environments.
 
