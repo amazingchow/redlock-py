@@ -31,6 +31,9 @@ class MultipleRedlockException(Exception):
 
 
 class Redlock(object):
+    """
+    A distributed lock implementation using Redis.
+    """
 
     def __init__(
             self,
@@ -39,6 +42,25 @@ class Redlock(object):
             retry_count: float = None,
             retry_delay: float = None
         ):
+        """
+        Initialize the Redlock instance.
+
+        Args:
+            connections (List[Union[redis.Redis, aio_redis.Redis]]): List of Redis connections.
+            async_mode (bool, optional): Whether to use asynchronous mode. Defaults to True.
+            retry_count (float, optional): Number of retry attempts. Defaults to None.
+            retry_delay (float, optional): Delay between retry attempts in seconds. Defaults to None.
+
+        Attributes:
+            _async_mode (bool): Whether asynchronous mode is enabled.
+            _servers (List[Union[redis.Redis, aio_redis.Redis]]): List of Redis connections.
+            _quorum (int): Quorum value for determining lock validity.
+            retry_count (float): Number of retry attempts.
+            retry_delay (float): Delay between retry attempts in seconds.
+            _clock_drift_factor (float): Clock drift factor for calculating lock validity.
+            _unlock_script (str): Lua script to unlock a resource.
+            _extend_script (str): Lua script to extend the lock.
+        """
 
         self._async_mode = async_mode
         self._servers = connections
@@ -122,11 +144,26 @@ end"""
         return server.execute_command("EVAL", self._extend_script, 1, resource, val, ttl) == 1
 
     def _get_unique_id(self) -> str:
+        """
+        Generate a unique identifier for the lock.
+
+        Returns:
+            str: Unique identifier.
+        """
         CHARACTERS = string.ascii_letters + string.digits
         return "".join([random.choice(CHARACTERS) for _ in range(22)])
 
     async def alock(self, resource: str, ttl: int) -> Tuple[bool, Optional[Lock]]:
-        """To acquire a lock. Param ttl should be milliseconds."""
+        """
+        Acquire a lock on a resource asynchronously.
+
+        Args:
+            resource (str): Resource to lock.
+            ttl (int): Time-to-live for the lock in milliseconds.
+
+        Returns:
+            Tuple[bool, Optional[Lock]]: A tuple containing a boolean indicating whether the lock is acquired successfully and an optional Lock object.
+        """
         retry = 0
         val = self._get_unique_id()
 
@@ -161,7 +198,7 @@ end"""
                 for server in self._servers:
                     try:
                         await self._aunlock_instance(server, resource, val)
-                    except:
+                    except Exception:
                         pass
                 retry += 1
                 restart_attempt = retry < self.retry_count
@@ -170,7 +207,16 @@ end"""
         return (False, None)
 
     def lock(self, resource: str, ttl: int) -> Tuple[bool, Optional[Lock]]:
-        """To acquire a lock. Param ttl should be milliseconds."""
+        """
+        Acquire a lock on a resource.
+
+        Args:
+            resource (str): Resource to lock.
+            ttl (int): Time-to-live for the lock in milliseconds.
+
+        Returns:
+            Tuple[bool, Optional[Lock]]: A tuple containing a boolean indicating whether the lock is acquired successfully and an optional Lock object.
+        """
         retry = 0
         val = self._get_unique_id()
 
@@ -205,7 +251,7 @@ end"""
                 for server in self._servers:
                     try:
                         self._unlock_instance(server, resource, val)
-                    except:
+                    except Exception:
                         pass
                 retry += 1
                 restart_attempt = retry < self.retry_count
@@ -214,7 +260,15 @@ end"""
         return (False, None)
 
     async def aunlock(self, lock: Lock) -> bool:
-        """To release a lock you already own"""
+        """
+        Release a lock on a resource asynchronously.
+
+        Args:
+            lock (Lock): Lock object to release.
+
+        Returns:
+            bool: True if the lock is released successfully, False otherwise.
+        """
         redis_errors = []
         for server in self._servers:
             try:
@@ -227,7 +281,15 @@ end"""
         return True
 
     def unlock(self, lock: Lock) -> bool:
-        """To release a lock you already own"""
+        """
+        Release a lock on a resource.
+
+        Args:
+            lock (Lock): Lock object to release.
+
+        Returns:
+            bool: True if the lock is released successfully, False otherwise.
+        """
         redis_errors = []
         for server in self._servers:
             try:
@@ -240,7 +302,16 @@ end"""
         return True
 
     async def aextend(self, lock: Lock, ttl: int) -> bool:
-        """To extend your ownership of a lock you already own. Param ttl should be milliseconds."""
+        """
+        Extend the validity of a lock on a resource asynchronously.
+
+        Args:
+            lock (Lock): Lock object to extend.
+            ttl (int): New time-to-live for the lock in milliseconds.
+
+        Returns:
+            bool: True if the lock is extended successfully, False otherwise.
+        """
         redis_errors = []
         n = 0
         for server in self._servers:
@@ -255,7 +326,16 @@ end"""
         return n >= self._quorum
 
     def extend(self, lock: Lock, ttl: int) -> bool:
-        """To extend your ownership of a lock you already own. Param ttl should be milliseconds."""
+        """
+        Extend the validity of a lock on a resource.
+
+        Args:
+            lock (Lock): Lock object to extend.
+            ttl (int): New time-to-live for the lock in milliseconds.
+
+        Returns:
+            bool: True if the lock is extended successfully, False otherwise.
+        """
         redis_errors = []
         n = 0
         for server in self._servers:
