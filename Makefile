@@ -9,5 +9,5 @@ deps: ### Package the runtime requirements.
 
 .PHONY: lint
 lint: ### Lint the source code.
-	@pyflakes redlock/*.py
-	@pycodestyle redlock/*.py --ignore=W293,E121,E125,E402,E501
+	@pyflakes pyredlock/*.py
+	@pycodestyle pyredlock/*.py --ignore=W293,E121,E125,E402,E501
